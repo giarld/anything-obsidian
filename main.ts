@@ -182,13 +182,16 @@ export default class AnythingObsidian extends Plugin {
 		const fileContent = await this.app.vault.read(file);
 		const mangledName = this.getMangledFileName(file);
 		
-		const formData = new FormData();
-		formData.append('file', new Blob([fileContent], { type: 'text/markdown' }), mangledName);
+		const createFormData = () => {
+			const formData = new FormData();
+			formData.append('file', new Blob([fileContent], { type: 'text/markdown' }), mangledName);
+			return formData;
+		};
 
 		try {
-			const response = await fetch(`${rootUrl}/api/v1/document/upload/${encodeURIComponent(remoteBaseFolder)}`, {
+			const response = await fetch(`${rootUrl}/api/v1/document/upload`, {
 				method: 'POST',
-				body: formData,
+				body: createFormData(),
 				headers: { 'Authorization': `Bearer ${apiKey}` }
 			});
 			
@@ -200,14 +203,70 @@ export default class AnythingObsidian extends Plugin {
 			}
 
 			// If upload is successful, add to workspaces
-			const newDocumentName = responseData.documents[0].name;
-			const documentPath = `${remoteBaseFolder}/${newDocumentName}`;
+			const uploadedDocument = responseData.documents?.[0];
+			let documentPath = this.getDocumentLocation(uploadedDocument, remoteBaseFolder);
+			if (!documentPath) {
+				this.notify(`Failed to upload ${file.name}: missing document location.`);
+				return;
+			}
+
+			const documentName = this.getDocumentFileName(uploadedDocument, documentPath);
+			if (!documentName) {
+				this.notify(`Failed to upload ${file.name}: missing document filename.`);
+				return;
+			}
+
+			const targetPath = `${remoteBaseFolder}/${documentName}`;
+			if (documentPath !== targetPath) {
+				await this.moveRemoteFile(documentPath, targetPath);
+				documentPath = targetPath;
+			}
+
 			for (const slug of workspaces) {
 				await this.addDocumentToWorkspace(slug, documentPath);
 			}
 
 		} catch (e: any) {
+			console.error(`Failed to upload ${file.name}:`, e);
 			this.notify(`Failed to upload ${file.name}.`);
+		}
+	}
+
+	getDocumentLocation(document: any, remoteBaseFolder: string): string | null {
+		let location = document?.location ? String(document.location).replace(/\\/g, '/') : null;
+		if (location) {
+			const documentsPathIndex = location.lastIndexOf('/documents/');
+			if (documentsPathIndex >= 0) {
+				location = location.slice(documentsPathIndex + '/documents/'.length);
+			}
+			if (location.startsWith('documents/')) {
+				location = location.slice('documents/'.length);
+			}
+			return location;
+		}
+		return document?.name ? `${remoteBaseFolder}/${document.name}` : null;
+	}
+
+	getDocumentFileName(document: any, documentPath: string): string | null {
+		return document?.name || documentPath.split('/').pop() || null;
+	}
+
+	async moveRemoteFile(from: string, to: string) {
+		if (from === to) return;
+		const { apiKey, rootUrl } = this.settings;
+		const targetFolder = to.split('/').slice(0, -1).join('/');
+		if (targetFolder) {
+			await this.ensureRemoteFolderExists(targetFolder);
+		}
+
+		const response = await fetch(`${rootUrl}/api/v1/document/move-files`, {
+			method: 'POST',
+			body: JSON.stringify({ files: [{ from, to }] }),
+			headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }
+		});
+		const responseData = await response.json().catch(() => ({}));
+		if (!response.ok || responseData.success === false) {
+			throw new Error(responseData.message || responseData.error || `Failed to move ${from} to ${to}`);
 		}
 	}
 
@@ -336,7 +395,7 @@ export default class AnythingObsidian extends Plugin {
 		const { apiKey, rootUrl, remoteBaseFolder } = this.settings;
 		try {
 			const response = await requestUrl({
-				url: `${rootUrl}/api/v1/documents/folder/${remoteBaseFolder}`,
+				url: `${rootUrl}/api/v1/documents/folder/${encodeURIComponent(remoteBaseFolder)}`,
 				method: 'GET',
 				headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${apiKey}` }
 			});
